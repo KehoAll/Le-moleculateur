@@ -8,18 +8,11 @@ from datetime import datetime
 
 from gooey import Gooey, GooeyParser
 
+
 ###############################################################################
 # 1) Lecture des masses atomiques ET de leurs incertitudes
 ###############################################################################
 def extract_molar_masses_and_uncertainties(path):
-    """
-    Lit un fichier Excel conforme a https://doi.org/10.1515/pac-2019-0603,
-    c.-a-d. des colonnes 'Symbol', 'Standard atomic weight' et 'Unnamed: 4'
-    ou 'Standard atomic weight' peut etre un float ou un intervalle,
-    et 'Unnamed: 4' l'incertitude standard (ou NaN si non specifiee).
-
-    Retourne un dictionnaire {Symbole : (Moyenne, Incertitude)}.
-    """
     df = pd.read_excel(path)
     
     symbols = df['Symbol'][1:]
@@ -41,10 +34,8 @@ def extract_molar_masses_and_uncertainties(path):
         if not s:
             continue
         
-        # Masse moyenne
         m_val = parse_maybe_interval(m)
 
-        # Incertitude
         if pd.isna(e):
             e_val = 0.0
         else:
@@ -223,7 +214,7 @@ def main():
     gas_group.add_argument(
         "--releaseCO2",
         action="store_true",
-        help="",  # on vide 'help', on va utiliser gooey_options pour le label
+        help="",
         gooey_options={"label": "Relacher CO2"}
     )
     gas_group.add_argument(
@@ -239,66 +230,65 @@ def main():
         gooey_options={"label": "Relacher H2O"}
     )
 
-    # Recupere args Gooey
     args = parser.parse_args()
 
-    # --- Conversion des champs ---
     final_formula = args.Prod.strip()
     mass_target   = float(args.m)
     decimals      = args.prec
     excel_path    = args.path
 
-    # Precs => split
+    # Liste des precurseurs
     precs_str = args.Precs.strip()
     if not precs_str:
         print("ERREUR : Aucun precurseur fourni.")
         sys.exit(1)
     precursors = precs_str.split()
 
-    # Purete => split
+    # Purete
     purete_str = args.Purete.strip()
     if purete_str:
         raw_purete = purete_str.split()
         purete_list = [float(x) for x in raw_purete]
     else:
+        # => pas rempli => 100% implicite
         purete_list = None
 
-    # Lecture du fichier Excel
+    # Lecture excel + parse formule finale
     dict_masses = extract_molar_masses_and_uncertainties(excel_path)
-
-    # Parse la formule finale
     final_dict = parse_formula(final_formula)
     M_final, dM_final = get_molar_mass_and_uncert(final_dict, dict_masses)
 
     # Parse des precurseurs
     precursor_dicts = [parse_formula(p) for p in precursors]
 
-    # Ajout des pseudo-precurseurs si coche
+    # Ajout byproducts si l'utilisateur coche
     byproducts = []
-
     if args.releaseCO2:
-        byproducts.append(("CO2", {"C":1,"O":2}))
+        byproducts.append(("CO2", {"C":1, "O":2}))
+        # Forcer C=0 dans le produit final si absent
         if "C" not in final_dict:
             final_dict["C"] = 0.0
 
     if args.releaseO2:
         byproducts.append(("O2", {"O":2}))
+        # Pas forcement besoin d'ajouter O=0 dans final_dict, le solide peut en contenir.
 
     if args.releaseH2O:
-        byproducts.append(("H2O", {"H":2,"O":1}))
+        byproducts.append(("H2O", {"H":2, "O":1}))
         if "H" not in final_dict:
             final_dict["H"] = 0.0
 
-    # On les ajoute a la liste precurseurs
+    # On les ajoute dans la liste
     for (byp_name, byp_dict) in byproducts:
         precursors.append(byp_name)
         precursor_dicts.append(byp_dict)
 
-    # Nombre initial de precurseurs reels
+    # Nombre de precurseurs reels (saisis)
     nb_init_prec = len(precs_str.split())
 
     # Gestion purete
     if (purete_list is None) or (len(purete_list) == 0):
+        # => tout 100%
         purete_list = [100.0] * nb_init_prec
     else:
         if len(purete_list) < nb_init_prec:
@@ -309,12 +299,14 @@ def main():
             print("Avertissement : trop de valeurs de purete, surplus ignore.")
         purete_list = purete_list[:nb_init_prec]
 
-    # Resolution
+    # Tolérance: 0.1%
+    tol = 0.001
+
+    # Resolution stoechiometrie
     x_stoich = solve_stoichiometry(final_dict, precursor_dicts)
-    
     n_final = mass_target / M_final
 
-    # Distinction masses positives / negatives
+    # On stocke separément:
     results_consumed = []
     results_byproducts = []
 
@@ -327,23 +319,27 @@ def main():
         mass_prec_i = M_prec_i * n_prec_i
         dm_prec_i   = dM_prec_i * abs(n_prec_i)
 
+        # Test: si i < nb_init_prec => vrai precurseur
+        # sinon => c'est un "byproduct" (CO2, O2, H2O)
         if i < nb_init_prec:
-            # Appliquer purete
+            # Precurseur reel
             pcent = purete_list[i]
             alpha = pcent / 100.0
             mass_corr = mass_prec_i / alpha
             dmass_corr = dm_prec_i / alpha
-
             if mass_prec_i >= 0:
-                results_consumed.append((prec_name, mass_corr, dmass_corr, pcent, mass_corr - mass_prec_i))
+                # "consomme"
+                results_consumed.append((prec_name, mass_corr, dmass_corr, pcent, mass_corr - mass_prec_i, M_prec_i))
             else:
-                results_byproducts.append((prec_name, -mass_corr, -dmass_corr))
+                # negative => bizarre => on le classe en sous-produit
+                results_byproducts.append((prec_name, abs(mass_corr), abs(dmass_corr)))
         else:
-            # Pseudo-precurseur
-            if mass_prec_i >= 0:
-                results_consumed.append((prec_name, mass_prec_i, dm_prec_i, 100.0, 0.0))
-            else:
-                results_byproducts.append((prec_name, -mass_prec_i, -dm_prec_i))
+            # i >= nb_init_prec => pseudo-precurseur (CO2, O2, H2O)
+            # => toujours un sous-produit, on force
+            # On met la masse en positif pour "masse > 0 => degage"
+            mass_rel = abs(mass_prec_i)
+            dmass_rel = abs(dm_prec_i)
+            results_byproducts.append((prec_name, mass_rel, dmass_rel))
 
     # Stoechiometrie reconstituee
     total_elements = {}
@@ -366,8 +362,7 @@ def main():
         scale = 1.0
     scaled_elements = {el: val*scale for el,val in total_elements.items()}
 
-    # Verif ecart +/-5%
-    tol = 0.05
+    # Verif ecarts
     errors_found = False
     for e in final_dict:
         target = final_dict[e]
@@ -382,7 +377,7 @@ def main():
 
     recon_formula = compose_formula_fixed_stoich(scaled_elements, decimals=3)
 
-    # Sauvegarde de la sortie
+    # Sauvegarde
     folder_name = final_formula
     if not os.path.exists(folder_name):
         os.makedirs(folder_name)
@@ -404,16 +399,44 @@ def main():
     tee = Tee(backup_stdout, f_out)
     sys.stdout = tee
 
-    # Affichage final
+    # === Affichage final ===
     print(f"Resultats sauvegardes dans : {candidate_path}\n")
     print(f"Produit final vise : {final_formula}")
     print(f"Masse visee       : {mass_target:.3f} g")
     print(f"Masse molaire du produit final : {M_final:.3f} +/- {dM_final:.3f} g/mol\n")
 
     print("===== Precurseurs (a peser) =====\n")
-    for (pname, mass_corr, dmass_corr, pcent, delta_m) in results_consumed:
-        print(f" * {pname:<8s} : {mass_corr:.{decimals}f} +/- {dmass_corr:.{decimals}f} g  "
-              f"(purete={pcent:.1f}%, delta={delta_m:.4f} g)")
+    for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
+        # Si purete != 100 => on affiche (purete=..., delta=...)
+        # Sinon on n'affiche rien
+        purete_str_print = ""
+        if abs(pcent - 100.0) > 1e-9:  # => pcent different de 100
+            purete_str_print = f"(purete={pcent:.1f}%, delta={delta_m:.4f} g)"
+
+        print(f" * {pname:<8s} : {mass_corr:.{decimals}f} +/- {dmass_corr:.{decimals}f} g  {purete_str_print}")
+
+    print("\n===== Details sur les precurseurs consommes =====\n")
+
+    total_mass = 0.0
+    total_moles = 0.0
+    consumed_data = []
+    for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
+        if M_prec_i != 0:
+            n_prec = mass_corr / M_prec_i
+        else:
+            n_prec = 0.0
+        consumed_data.append((pname, mass_corr, n_prec))
+        total_mass += max(mass_corr, 0)
+        total_moles += max(n_prec, 0)
+
+    if total_mass < 1e-12 or total_moles < 1e-12:
+        print("Aucun precurseur reel consomme !")
+    else:
+        for (pname, m_corr, n_corr) in consumed_data:
+            frac_mass = m_corr / total_mass
+            frac_mole = n_corr / total_moles
+            print(f" - {pname:<8s} : masse = {m_corr:.{decimals}f} g,  fraction massique = {frac_mass*100:.2f}%, "
+                  f"n = {n_corr:.{decimals}f} mol, fraction molaire = {frac_mole*100:.2f}%")
 
     print("\n===== Sous-produits rejetes (masse > 0 => degage) =====\n")
     if len(results_byproducts) == 0:
