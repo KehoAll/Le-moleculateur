@@ -150,7 +150,7 @@ class Tee(object):
 def main():
     parser = GooeyParser(
         description="Calcule les masses de precurseurs (avec incertitudes), "
-                    "et permet d'ajuster la decomposition en CO2 / O2 / H2O."
+                    "et permet d'ajuster la decomposition en CO2 / O2 / H2O / NO2."
     )
 
     parser.add_argument(
@@ -205,7 +205,7 @@ def main():
         widget="FileChooser"
     )
 
-    # Groupe "Degagement de gaz" + 3 checkboxes en francais
+    # Groupe "Degagement de gaz" + 4 checkboxes en francais
     gas_group = parser.add_argument_group(
         "Degagement de gaz",
         "Cochez pour autoriser la production des gaz suivants :"
@@ -228,6 +228,12 @@ def main():
         action="store_true",
         help="",
         gooey_options={"label": "Relacher H2O"}
+    )
+    gas_group.add_argument(
+        "--releaseNO2",
+        action="store_true",
+        help="",
+        gooey_options={"label": "Relacher NO2"}
     )
 
     args = parser.parse_args()
@@ -265,18 +271,21 @@ def main():
     byproducts = []
     if args.releaseCO2:
         byproducts.append(("CO2", {"C":1, "O":2}))
-        # Forcer C=0 dans le produit final si absent
         if "C" not in final_dict:
             final_dict["C"] = 0.0
 
     if args.releaseO2:
         byproducts.append(("O2", {"O":2}))
-        # Pas forcement besoin d'ajouter O=0 dans final_dict, le solide peut en contenir.
 
     if args.releaseH2O:
         byproducts.append(("H2O", {"H":2, "O":1}))
         if "H" not in final_dict:
             final_dict["H"] = 0.0
+
+    if args.releaseNO2:
+        byproducts.append(("NO2", {"N":1, "O":2}))
+        if "N" not in final_dict:
+            final_dict["N"] = 0.0
 
     # On les ajoute dans la liste
     for (byp_name, byp_dict) in byproducts:
@@ -288,7 +297,6 @@ def main():
 
     # Gestion purete
     if (purete_list is None) or (len(purete_list) == 0):
-        # => tout 100%
         purete_list = [100.0] * nb_init_prec
     else:
         if len(purete_list) < nb_init_prec:
@@ -302,11 +310,11 @@ def main():
     # Tolérance: 0.1%
     tol = 0.001
 
-    # Resolution stoechiometrie
+    # Résolution stoechiométrie
     x_stoich = solve_stoichiometry(final_dict, precursor_dicts)
     n_final = mass_target / M_final
 
-    # On stocke separément:
+    # On stocke séparément:
     results_consumed = []
     results_byproducts = []
 
@@ -319,29 +327,21 @@ def main():
         mass_prec_i = M_prec_i * n_prec_i
         dm_prec_i   = dM_prec_i * abs(n_prec_i)
 
-        # Test: si i < nb_init_prec => vrai precurseur
-        # sinon => c'est un "byproduct" (CO2, O2, H2O)
         if i < nb_init_prec:
-            # Precurseur reel
             pcent = purete_list[i]
             alpha = pcent / 100.0
             mass_corr = mass_prec_i / alpha
             dmass_corr = dm_prec_i / alpha
             if mass_prec_i >= 0:
-                # "consomme"
                 results_consumed.append((prec_name, mass_corr, dmass_corr, pcent, mass_corr - mass_prec_i, M_prec_i))
             else:
-                # negative => bizarre => on le classe en sous-produit
                 results_byproducts.append((prec_name, abs(mass_corr), abs(dmass_corr)))
         else:
-            # i >= nb_init_prec => pseudo-precurseur (CO2, O2, H2O)
-            # => toujours un sous-produit, on force
-            # On met la masse en positif pour "masse > 0 => degage"
             mass_rel = abs(mass_prec_i)
             dmass_rel = abs(dm_prec_i)
             results_byproducts.append((prec_name, mass_rel, dmass_rel))
 
-    # Stoechiometrie reconstituee
+    # Stœchiométrie reconstituée
     total_elements = {}
     partial_stoech = []
     for i, p_dict in enumerate(precursor_dicts):
@@ -362,17 +362,17 @@ def main():
         scale = 1.0
     scaled_elements = {el: val*scale for el,val in total_elements.items()}
 
-    # Verif ecarts
+    # Vérif écarts
     errors_found = False
     for e in final_dict:
         target = final_dict[e]
-        found = scaled_elements.get(e, 0.0)
+        found  = scaled_elements.get(e, 0.0)
         if target != 0:
             diff_rel = abs(found - target) / target
             if diff_rel > tol:
-                print(f"\nATTENTION : Ecart trop grand pour l'element {e} :")
-                print(f"  Souhaite = {target:.3f},   Obtenu = {found:.3f}")
-                print(f"  Ecart relatif = {diff_rel*100:.2f}% > {tol*100:.1f}%\n")
+                print(f"\nATTENTION : Écart trop grand pour l'élément {e} :")
+                print(f"  Souhaité = {target:.3f},   Obtenu = {found:.3f}")
+                print(f"  Écart relatif = {diff_rel*100:.2f}% > {tol*100:.1f}%\n")
                 errors_found = True
 
     recon_formula = compose_formula_fixed_stoich(scaled_elements, decimals=3)
@@ -407,24 +407,17 @@ def main():
 
     print("===== Precurseurs (a peser) =====\n")
     for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
-        # Si purete != 100 => on affiche (purete=..., delta=...)
-        # Sinon on n'affiche rien
         purete_str_print = ""
-        if abs(pcent - 100.0) > 1e-9:  # => pcent different de 100
+        if abs(pcent - 100.0) > 1e-9:
             purete_str_print = f"(purete={pcent:.1f}%, delta={delta_m:.4f} g)"
-
         print(f" * {pname:<8s} : {mass_corr:.{decimals}f} +/- {dmass_corr:.{decimals}f} g  {purete_str_print}")
 
     print("\n===== Details sur les precurseurs consommes =====\n")
-
     total_mass = 0.0
     total_moles = 0.0
     consumed_data = []
     for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
-        if M_prec_i != 0:
-            n_prec = mass_corr / M_prec_i
-        else:
-            n_prec = 0.0
+        n_prec = (mass_corr / M_prec_i) if M_prec_i else 0.0
         consumed_data.append((pname, mass_corr, n_prec))
         total_mass += max(mass_corr, 0)
         total_moles += max(n_prec, 0)
@@ -435,11 +428,10 @@ def main():
         for (pname, m_corr, n_corr) in consumed_data:
             frac_mass = m_corr / total_mass
             frac_mole = n_corr / total_moles
-            print(f" - {pname:<8s} : masse = {m_corr:.{decimals}f} g,  fraction massique = {frac_mass*100:.2f}%, "
-                  f"n = {n_corr:.{decimals}f} mol, fraction molaire = {frac_mole*100:.2f}%")
+            print(f" - {pname:<8s} : masse = {m_corr:.{decimals}f} g,  fraction massique = {frac_mass*100:.2f}%, n = {n_corr:.{decimals}f} mol, fraction molaire = {frac_mole*100:.2f}%")
 
     print("\n===== Sous-produits rejetes (masse > 0 => degage) =====\n")
-    if len(results_byproducts) == 0:
+    if not results_byproducts:
         print("Aucun sous-produit calcule (mass negative)")
     else:
         for (pname, mass_rel, dmass_rel) in results_byproducts:
