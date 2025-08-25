@@ -144,13 +144,13 @@ class Tee(object):
 ###############################################################################
 @Gooey(
     program_name="Le Moleculateur",
-    default_size=(800, 720),
+    default_size=(800, 780),
     optional_args_label="Options"
 )
 def main():
     parser = GooeyParser(
         description="Calcule les masses de precurseurs (avec incertitudes), "
-                    "et permet d'ajuster la decomposition en CO2 / O2 / H2O / NO2."
+                    "et permet d'ajuster la decomposition en CO2 / O2 / H2O / NO2 + autres gaz libres."
     )
 
     parser.add_argument(
@@ -186,6 +186,15 @@ def main():
         widget="TextField"
     )
 
+    # NEW: Elément de normalisation optionnel
+    parser.add_argument(
+        "--PivotEl",
+        metavar="Element de normalisation (optionnel)",
+        help="Symbole d'un element (ex: O) pour normaliser la formule reconstituee sur cet element.",
+        default="",
+        widget="TextField"
+    )
+
     parser.add_argument(
         "--prec",
         metavar="Precision (decimales) (optionnel)",
@@ -205,7 +214,7 @@ def main():
         widget="FileChooser"
     )
 
-    # Groupe "Degagement de gaz" + 4 checkboxes en francais
+    # Groupe "Degagement de gaz"
     gas_group = parser.add_argument_group(
         "Degagement de gaz",
         "Cochez pour autoriser la production des gaz suivants :"
@@ -229,11 +238,21 @@ def main():
         help="",
         gooey_options={"label": "Relacher H2O"}
     )
+    # NEW: case NO2
     gas_group.add_argument(
         "--releaseNO2",
         action="store_true",
         help="",
         gooey_options={"label": "Relacher NO2"}
+    )
+
+    # NEW: champ libre pour d'autres gaz
+    parser.add_argument(
+        "--OtherGases",
+        metavar="Autres gaz a relacher (optionnel)",
+        help="Liste d'especes gazeuses supplementaires separees par des espaces ou des virgules (ex: CO NO N2 H2S).",
+        default="",
+        widget="TextField"
     )
 
     args = parser.parse_args()
@@ -242,6 +261,7 @@ def main():
     mass_target   = float(args.m)
     decimals      = args.prec
     excel_path    = args.path
+    pivot_el_user = args.PivotEl.strip()
 
     # Liste des precurseurs
     precs_str = args.Precs.strip()
@@ -256,7 +276,6 @@ def main():
         raw_purete = purete_str.split()
         purete_list = [float(x) for x in raw_purete]
     else:
-        # => pas rempli => 100% implicite
         purete_list = None
 
     # Lecture excel + parse formule finale
@@ -267,8 +286,15 @@ def main():
     # Parse des precurseurs
     precursor_dicts = [parse_formula(p) for p in precursors]
 
-    # Ajout byproducts si l'utilisateur coche
+    # === Gestion des sous-produits "gaz" ===
     byproducts = []
+
+    def ensure_elements_in_final(byp_dict):
+        """Pour chaque element d'un gaz byproduct, s'il n'est pas dans la formule finale, l'ajouter avec 0."""
+        for el in byp_dict.keys():
+            if el not in final_dict:
+                final_dict[el] = 0.0
+
     if args.releaseCO2:
         byproducts.append(("CO2", {"C":1, "O":2}))
         if "C" not in final_dict:
@@ -276,16 +302,46 @@ def main():
 
     if args.releaseO2:
         byproducts.append(("O2", {"O":2}))
+        # O peut etre deja dans le solide, pas necessaire de forcer O=0
 
     if args.releaseH2O:
         byproducts.append(("H2O", {"H":2, "O":1}))
         if "H" not in final_dict:
             final_dict["H"] = 0.0
 
+    # NEW: NO2
     if args.releaseNO2:
         byproducts.append(("NO2", {"N":1, "O":2}))
         if "N" not in final_dict:
             final_dict["N"] = 0.0
+
+    # NEW: autres gaz libres (ex: CO, NO, N2, H2S, ...)
+    other_gases_str = args.OtherGases.strip()
+    if other_gases_str:
+        tokens = re.split(r'[,\s]+', other_gases_str)
+        for tok in tokens:
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                d_tok = parse_formula(tok)
+                if len(d_tok) == 0:
+                    print(f"Avertissement : gaz '{tok}' non reconnu, ignore.")
+                    continue
+                byproducts.append((tok, d_tok))
+                ensure_elements_in_final(d_tok)
+            except Exception as ex:
+                print(f"Avertissement : gaz '{tok}' non interpretable ({ex}), ignore.")
+
+    # De-duplication eventuelle des byproducts par nom
+    if byproducts:
+        dedup = []
+        seen = set()
+        for name, dct in byproducts:
+            if name not in seen:
+                dedup.append((name, dct))
+                seen.add(name)
+        byproducts = dedup
 
     # On les ajoute dans la liste
     for (byp_name, byp_dict) in byproducts:
@@ -307,14 +363,15 @@ def main():
             print("Avertissement : trop de valeurs de purete, surplus ignore.")
         purete_list = purete_list[:nb_init_prec]
 
-    # Tolérance: 0.1%
-    tol = 0.001
+    # Tolerances
+    tol = 0.001  # 0.1%
+    eps = 1e-14
 
-    # Résolution stoechiométrie
+    # Resolution stoechiometrie
     x_stoich = solve_stoichiometry(final_dict, precursor_dicts)
     n_final = mass_target / M_final
 
-    # On stocke séparément:
+    # On stocke separément:
     results_consumed = []
     results_byproducts = []
 
@@ -328,6 +385,7 @@ def main():
         dm_prec_i   = dM_prec_i * abs(n_prec_i)
 
         if i < nb_init_prec:
+            # Precurseur reel
             pcent = purete_list[i]
             alpha = pcent / 100.0
             mass_corr = mass_prec_i / alpha
@@ -337,11 +395,12 @@ def main():
             else:
                 results_byproducts.append((prec_name, abs(mass_corr), abs(dmass_corr)))
         else:
+            # Pseudo-precurseur (gaz) => sous-produit degage
             mass_rel = abs(mass_prec_i)
             dmass_rel = abs(dm_prec_i)
             results_byproducts.append((prec_name, mass_rel, dmass_rel))
 
-    # Stœchiométrie reconstituée
+    # Stoechiometrie reconstituee
     total_elements = {}
     partial_stoech = []
     for i, p_dict in enumerate(precursor_dicts):
@@ -353,26 +412,43 @@ def main():
             sto_dict_i[el] = contrib
         partial_stoech.append((precursors[i], sto_dict_i))
 
-    # Normalisation
+    # === Normalisation : par l'element choisi si fourni, sinon comme avant ===
+    # Choix par defaut = element au coeff le plus grand dans la formule cible
     sorted_by_stoich = sorted(final_dict.items(), key=lambda x: x[1], reverse=True)
-    ref_el, ref_val = sorted_by_stoich[0]
-    if ref_el in total_elements and total_elements[ref_el] > 1e-14:
-        scale = ref_val / total_elements[ref_el]
+    default_ref_el, default_ref_val = sorted_by_stoich[0]
+
+    use_ref_el = default_ref_el
+    use_ref_val = default_ref_val
+
+    if pivot_el_user:
+        if pivot_el_user not in final_dict or final_dict[pivot_el_user] <= 0.0:
+            print(f"Avertissement : element de normalisation '{pivot_el_user}' absent ou nul dans la formule finale. "
+                  f"Normalisation par defaut sur {default_ref_el}.")
+        else:
+            use_ref_el = pivot_el_user
+            use_ref_val = final_dict[pivot_el_user]
+
+    denom = total_elements.get(use_ref_el, 0.0)
+    if denom > eps:
+        scale = use_ref_val / denom
     else:
+        print(f"Avertissement : impossible de normaliser sur {use_ref_el} (denominateur nul). "
+              f"Facteur d'echelle fixe a 1.0.")
         scale = 1.0
+
     scaled_elements = {el: val*scale for el,val in total_elements.items()}
 
-    # Vérif écarts
+    # Verif ecarts
     errors_found = False
     for e in final_dict:
         target = final_dict[e]
-        found  = scaled_elements.get(e, 0.0)
+        found = scaled_elements.get(e, 0.0)
         if target != 0:
             diff_rel = abs(found - target) / target
             if diff_rel > tol:
-                print(f"\nATTENTION : Écart trop grand pour l'élément {e} :")
-                print(f"  Souhaité = {target:.3f},   Obtenu = {found:.3f}")
-                print(f"  Écart relatif = {diff_rel*100:.2f}% > {tol*100:.1f}%\n")
+                print(f"\nATTENTION : Ecart trop grand pour l'element {e} :")
+                print(f"  Souhaite = {target:.3f},   Obtenu = {found:.3f}")
+                print(f"  Ecart relatif = {diff_rel*100:.2f}% > {tol*100:.1f}%\n")
                 errors_found = True
 
     recon_formula = compose_formula_fixed_stoich(scaled_elements, decimals=3)
@@ -384,6 +460,8 @@ def main():
         
     timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
     filename_base = f"{final_formula}_with_{'_'.join(precs_str.split())}"
+    if byproducts:
+        filename_base += f"_gas_{'_'.join([name for name,_ in byproducts])}"
     filename_base = f"{timestamp}_{filename_base}"
     
     i = 1
@@ -405,6 +483,9 @@ def main():
     print(f"Masse visee       : {mass_target:.3f} g")
     print(f"Masse molaire du produit final : {M_final:.3f} +/- {dM_final:.3f} g/mol\n")
 
+    if pivot_el_user:
+        print(f"Normalisation de la formule reconstituee sur : {use_ref_el}\n")
+
     print("===== Precurseurs (a peser) =====\n")
     for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
         purete_str_print = ""
@@ -413,11 +494,15 @@ def main():
         print(f" * {pname:<8s} : {mass_corr:.{decimals}f} +/- {dmass_corr:.{decimals}f} g  {purete_str_print}")
 
     print("\n===== Details sur les precurseurs consommes =====\n")
+
     total_mass = 0.0
     total_moles = 0.0
     consumed_data = []
     for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
-        n_prec = (mass_corr / M_prec_i) if M_prec_i else 0.0
+        if M_prec_i != 0:
+            n_prec = mass_corr / M_prec_i
+        else:
+            n_prec = 0.0
         consumed_data.append((pname, mass_corr, n_prec))
         total_mass += max(mass_corr, 0)
         total_moles += max(n_prec, 0)
@@ -428,10 +513,11 @@ def main():
         for (pname, m_corr, n_corr) in consumed_data:
             frac_mass = m_corr / total_mass
             frac_mole = n_corr / total_moles
-            print(f" - {pname:<8s} : masse = {m_corr:.{decimals}f} g,  fraction massique = {frac_mass*100:.2f}%, n = {n_corr:.{decimals}f} mol, fraction molaire = {frac_mole*100:.2f}%")
+            print(f" - {pname:<8s} : masse = {m_corr:.{decimals}f} g,  fraction massique = {frac_mass*100:.2f}%, "
+                  f"n = {n_corr:.{decimals}f} mol, fraction molaire = {frac_mole*100:.2f}%")
 
     print("\n===== Sous-produits rejetes (masse > 0 => degage) =====\n")
-    if not results_byproducts:
+    if len(results_byproducts) == 0:
         print("Aucun sous-produit calcule (mass negative)")
     else:
         for (pname, mass_rel, dmass_rel) in results_byproducts:
@@ -447,7 +533,7 @@ def main():
         for el in sorted(sto_dict.keys()):
             print(f"    {el} : {sto_dict[el]:.3f}")
 
-    print(f"\nFormule brute reconstituee (normalisee sur {ref_el}) : {recon_formula}")
+    print(f"\nFormule brute reconstituee (normalisee sur {use_ref_el}) : {recon_formula}")
 
     sys.stdout = backup_stdout
     f_out.close()
