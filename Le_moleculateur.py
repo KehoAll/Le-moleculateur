@@ -13,7 +13,16 @@ from gooey import Gooey, GooeyParser
 # 1) Lecture des masses atomiques ET de leurs incertitudes
 ###############################################################################
 def extract_molar_masses_and_uncertainties(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Fichier Excel introuvable: {path}")
     df = pd.read_excel(path)
+    required_columns = {"Symbol", "Standard atomic weight", "Unnamed: 4"}
+    missing_columns = required_columns.difference(df.columns)
+    if missing_columns:
+        raise ValueError(
+            "Colonnes manquantes dans le fichier Excel: "
+            + ", ".join(sorted(missing_columns))
+        )
     
     symbols = df['Symbol'][1:]
     masses  = df['Standard atomic weight'][1:]
@@ -24,7 +33,7 @@ def extract_molar_masses_and_uncertainties(path):
             try:
                 pair = ast.literal_eval(value)  # ex: "[10.8, 11.0]"
                 return float(np.mean(pair))
-            except:
+            except (ValueError, SyntaxError):
                 pass
         return float(value)
     
@@ -42,7 +51,7 @@ def extract_molar_masses_and_uncertainties(path):
             try:
                 pair_err = ast.literal_eval(str(e))
                 e_val = abs(pair_err[1] - pair_err[0]) / 2.0
-            except:
+            except (ValueError, SyntaxError, TypeError):
                 e_val = float(e)
         
         result[s] = (m_val, e_val)
@@ -54,17 +63,53 @@ def extract_molar_masses_and_uncertainties(path):
 # 2) Parsing d'une formule brute => dict { El : stoich }
 ###############################################################################
 def parse_formula(formula):
-    pattern = r'([A-Z][a-z]?)(\d*\.?\d*)'
-    parts = re.findall(pattern, formula)
-    
-    comp_dict = {}
-    for (el, num_str) in parts:
-        if not num_str:
-            coeff = 1.0
-        else:
-            coeff = float(num_str)
-        comp_dict[el] = comp_dict.get(el, 0.0) + coeff
-    return comp_dict
+    token_pattern = r'([A-Z][a-z]?|\d+(?:\.\d+)?|\(|\))'
+    tokens = re.findall(token_pattern, formula)
+    if not tokens:
+        raise ValueError("Formule brute vide ou invalide.")
+
+    def is_number(token):
+        return re.fullmatch(r'\d+(?:\.\d+)?', token) is not None
+
+    def is_element(token):
+        return re.fullmatch(r'[A-Z][a-z]?', token) is not None
+
+    stack = [{}]
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "(":
+            stack.append({})
+            i += 1
+            continue
+        if tok == ")":
+            if len(stack) == 1:
+                raise ValueError("Parenthese fermante sans ouvrante.")
+            group = stack.pop()
+            multiplier = 1.0
+            if i + 1 < len(tokens) and is_number(tokens[i + 1]):
+                multiplier = float(tokens[i + 1])
+                i += 1
+            for el, count in group.items():
+                stack[-1][el] = stack[-1].get(el, 0.0) + count * multiplier
+            i += 1
+            continue
+        if is_element(tok):
+            multiplier = 1.0
+            if i + 1 < len(tokens) and is_number(tokens[i + 1]):
+                multiplier = float(tokens[i + 1])
+                i += 1
+            stack[-1][tok] = stack[-1].get(tok, 0.0) + multiplier
+            i += 1
+            continue
+        if is_number(tok):
+            raise ValueError(f"Nombre inattendu dans la formule: '{tok}'.")
+        raise ValueError(f"Jeton inconnu dans la formule: '{tok}'.")
+
+    if len(stack) != 1:
+        raise ValueError("Parenthese ouvrante sans fermante.")
+
+    return stack[0]
 
 
 ###############################################################################
@@ -204,6 +249,15 @@ def main():
         widget="IntegerField"
     )
 
+    parser.add_argument(
+        "--tol",
+        metavar="Tolerance relative (optionnel)",
+        help="Tolerance relative pour la verification (defaut: 0.001 = 0.1%).",
+        default=0.001,
+        type=float,
+        widget="DecimalField"
+    )
+
     # Fichier Excel obligatoire, AVEC une valeur par defaut
     parser.add_argument(
         "--path",
@@ -260,6 +314,7 @@ def main():
     final_formula = args.Prod.strip()
     mass_target   = float(args.m)
     decimals      = args.prec
+    tol           = float(args.tol)
     excel_path    = args.path
     pivot_el_user = args.PivotEl.strip()
 
@@ -363,8 +418,6 @@ def main():
             print("Avertissement : trop de valeurs de purete, surplus ignore.")
         purete_list = purete_list[:nb_init_prec]
 
-    # Tolerances
-    tol = 0.001  # 0.1%
     eps = 1e-14
 
     # Resolution stoechiometrie
@@ -479,6 +532,16 @@ def main():
 
     # === Affichage final ===
     print(f"Resultats sauvegardes dans : {candidate_path}\n")
+    print("===== Parametres d'entree =====")
+    print(f"Fichier Excel      : {excel_path}")
+    print(f"Precurseurs        : {', '.join(precs_str.split())}")
+    if purete_list:
+        print(f"Purete (%)         : {', '.join(f'{p:.2f}' for p in purete_list)}")
+    if byproducts:
+        print(f"Gaz autorises      : {', '.join(name for name, _ in byproducts)}")
+    else:
+        print("Gaz autorises      : aucun")
+    print(f"Tol. verification  : {tol}\n")
     print(f"Produit final vise : {final_formula}")
     print(f"Masse visee       : {mass_target:.3f} g")
     print(f"Masse molaire du produit final : {M_final:.3f} +/- {dM_final:.3f} g/mol\n")
