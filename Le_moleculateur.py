@@ -63,6 +63,7 @@ def extract_molar_masses_and_uncertainties(path):
 # 2) Parsing d'une formule brute => dict { El : stoich }
 ###############################################################################
 def parse_formula(formula):
+    formula = re.sub(r"\s+", "", formula)
     token_pattern = r'([A-Z][a-z]?|\d+(?:\.\d+)?|\(|\))'
     tokens = re.findall(token_pattern, formula)
     if not tokens:
