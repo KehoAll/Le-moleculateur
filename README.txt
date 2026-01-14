@@ -18,3 +18,10 @@ Conseils pour reduire la taille de l'executable :
 - Utiliser UPX pour compresser l'executable (option "--upx-dir" de PyInstaller).
 - Exclure les modules inutiles via "--exclude-module" (ex: matplotlib, scipy) si non utilises.
 - Nettoyer les datas embarquees si elles ne sont pas necessaires au runtime.
+
+Nouveautes (version 1.3.0) :
+- Support des formules avec parenthèses, hydrates (ex: CuSO4·5H2O) et charges finales (+/-).
+- Parametre "--sheet" pour selectionner la feuille Excel.
+- Option "Exporter CSV" pour obtenir un fichier .csv a cote du rapport texte.
+- Option "Forcer les quantites negatives a zero" pour bloquer les coefficients negatifs.
+- Memorisation automatique des derniers parametres (fichier .le_moleculateur_config.json).
