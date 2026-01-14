@@ -8,6 +8,8 @@ from datetime import datetime
 
 from gooey import Gooey, GooeyParser
 
+APP_VERSION = "dev"
+
 
 ###############################################################################
 # 1) Lecture des masses atomiques ET de leurs incertitudes
@@ -318,6 +320,7 @@ def main():
     tol           = float(args.tol)
     excel_path    = args.path
     pivot_el_user = args.PivotEl.strip()
+    run_timestamp = datetime.now()
 
     # Liste des precurseurs
     precs_str = args.Precs.strip()
@@ -512,11 +515,11 @@ def main():
     if not os.path.exists(folder_name):
         os.makedirs(folder_name)
         
-    timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
+    timestamp_str = run_timestamp.strftime("%Y_%m_%d_%H_%M")
     filename_base = f"{final_formula}_with_{'_'.join(precs_str.split())}"
     if byproducts:
         filename_base += f"_gas_{'_'.join([name for name,_ in byproducts])}"
-    filename_base = f"{timestamp}_{filename_base}"
+    filename_base = f"{timestamp_str}_{filename_base}"
     
     i = 1
     while True:
@@ -534,6 +537,8 @@ def main():
     # === Affichage final ===
     print(f"Resultats sauvegardes dans : {candidate_path}\n")
     print("===== Parametres d'entree =====")
+    print(f"Version            : {APP_VERSION}")
+    print(f"Date execution     : {run_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Fichier Excel      : {excel_path}")
     print(f"Precurseurs        : {', '.join(precs_str.split())}")
     if purete_list:
