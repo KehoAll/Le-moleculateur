@@ -1,105 +1,41 @@
 import sys
 import os
 import re
-import ast
-import numpy as np
-import pandas as pd
+import json
+import csv
+import math
 from datetime import datetime
 
 from gooey import Gooey, GooeyParser
 
+from core import (
+    extract_molar_masses_and_uncertainties,
+    parse_formula,
+    validate_elements,
+    get_molar_mass_and_uncert,
+    solve_stoichiometry,
+)
 
-###############################################################################
-# 1) Lecture des masses atomiques ET de leurs incertitudes
-###############################################################################
-def extract_molar_masses_and_uncertainties(path):
-    df = pd.read_excel(path)
-    
-    symbols = df['Symbol'][1:]
-    masses  = df['Standard atomic weight'][1:]
-    errs    = df['Unnamed: 4'][1:]
-    
-    def parse_maybe_interval(value):
-        if isinstance(value, str):
-            try:
-                pair = ast.literal_eval(value)  # ex: "[10.8, 11.0]"
-                return float(np.mean(pair))
-            except:
-                pass
-        return float(value)
-    
-    result = {}
-    for s, m, e in zip(symbols, masses, errs):
-        s = str(s).strip()
-        if not s:
-            continue
-        
-        m_val = parse_maybe_interval(m)
-
-        if pd.isna(e):
-            e_val = 0.0
-        else:
-            try:
-                pair_err = ast.literal_eval(str(e))
-                e_val = abs(pair_err[1] - pair_err[0]) / 2.0
-            except:
-                e_val = float(e)
-        
-        result[s] = (m_val, e_val)
-    
-    return result
+APP_VERSION = "1.4.0"
+CONFIG_FILENAME = ".le_moleculateur_config.json"
 
 
-###############################################################################
-# 2) Parsing d'une formule brute => dict { El : stoich }
-###############################################################################
-def parse_formula(formula):
-    pattern = r'([A-Z][a-z]?)(\d*\.?\d*)'
-    parts = re.findall(pattern, formula)
-    
-    comp_dict = {}
-    for (el, num_str) in parts:
-        if not num_str:
-            coeff = 1.0
-        else:
-            coeff = float(num_str)
-        comp_dict[el] = comp_dict.get(el, 0.0) + coeff
-    return comp_dict
+def load_last_config(config_path):
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
-###############################################################################
-# 3) Masse molaire et incertitude d'un compose
-###############################################################################
-def get_molar_mass_and_uncert(comp_dict, dict_masses):
-    M = 0.0
-    dM2 = 0.0
-    for el, count in comp_dict.items():
-        if el not in dict_masses:
-            raise ValueError(f"Element '{el}' introuvable dans le tableau de masses atomiques.")
-        M_el, dM_el = dict_masses[el]
-        M     += count * M_el
-        dM2   += (count * dM_el) ** 2
-    return M, np.sqrt(dM2)
-
-
-###############################################################################
-# 4) Resolution stoech => x
-###############################################################################
-def solve_stoichiometry(final_dict, precursor_dicts):
-    elements = list(final_dict.keys())
-    nb_el = len(elements)
-    nb_prec = len(precursor_dicts)
-    
-    P = np.zeros((nb_el, nb_prec))
-    f = np.zeros(nb_el)
-    
-    for i, el in enumerate(elements):
-        f[i] = final_dict[el]
-        for j, pdict in enumerate(precursor_dicts):
-            P[i, j] = pdict.get(el, 0.0)
-    
-    x, residuals, rank, s = np.linalg.lstsq(P, f, rcond=None)
-    return x
+def save_last_config(config_path, payload):
+    try:
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 
 ###############################################################################
@@ -148,6 +84,8 @@ class Tee(object):
     optional_args_label="Options"
 )
 def main():
+    config_path = os.path.join(os.getcwd(), CONFIG_FILENAME)
+    last_config = load_last_config(config_path)
     parser = GooeyParser(
         description="Calcule les masses de precurseurs (avec incertitudes), "
                     "et permet d'ajuster la decomposition en CO2 / O2 / H2O / NO2 + autres gaz libres."
@@ -158,6 +96,7 @@ def main():
         metavar="Formule finale (obligatoire)",
         help="Formule brute du produit final (ex: Ca5Ga6O14).",
         required=True,
+        default=last_config.get("Prod", ""),
         widget="TextField"
     )
 
@@ -165,7 +104,7 @@ def main():
         "--m",
         metavar="Masse en grammes (defaut: 1.0g)",
         help="Masse en grammes (defaut: 1.0g).",
-        default=1.0,
+        default=last_config.get("m", 1.0),
         type=float,
         widget="DecimalField"
     )
@@ -175,6 +114,7 @@ def main():
         metavar="Precurseurs (obligatoire)",
         help="Liste des precurseurs separes par des espaces (ex: CaO Ga2O3).",
         required=True,
+        default=last_config.get("Precs", ""),
         widget="TextField"
     )
 
@@ -182,7 +122,7 @@ def main():
         "--Purete",
         metavar="Purete (%) (optionnel)",
         help="Pourcentages de purete (ex: 99 99.99), meme ordre que les precurseurs.",
-        default="",
+        default=last_config.get("Purete", ""),
         widget="TextField"
     )
 
@@ -191,7 +131,7 @@ def main():
         "--PivotEl",
         metavar="Element de normalisation (optionnel)",
         help="Symbole d'un element (ex: O) pour normaliser la formule reconstituee sur cet element.",
-        default="",
+        default=last_config.get("PivotEl", ""),
         widget="TextField"
     )
 
@@ -199,9 +139,25 @@ def main():
         "--prec",
         metavar="Precision (decimales) (optionnel)",
         help="Nombre de decimales pour l'affichage (defaut: 4).",
-        default=4,
+        default=last_config.get("prec", 4),
         type=int,
         widget="IntegerField"
+    )
+
+    parser.add_argument(
+        "--tol",
+        metavar="Tolerance relative (optionnel)",
+        help="Tolerance relative pour la verification (defaut: 0.001 = 0.1%).",
+        default=last_config.get("tol", 0.001),
+        type=float,
+        widget="DecimalField"
+    )
+    parser.add_argument(
+        "--sheet",
+        metavar="Feuille Excel (optionnel)",
+        help="Nom ou index de feuille Excel (defaut: 0).",
+        default=last_config.get("sheet", "0"),
+        widget="TextField"
     )
 
     # Fichier Excel obligatoire, AVEC une valeur par defaut
@@ -210,7 +166,9 @@ def main():
         metavar="Fichier Excel (obligatoire)",
         help="Chemin du fichier Excel (masses atomiques).",
         required=True,
-        default=os.path.join(os.getcwd(), 'Atomic weights.xlsx'),
+        default=last_config.get(
+            "path", os.path.join(os.getcwd(), 'Atomic weights.xlsx')
+        ),
         widget="FileChooser"
     )
 
@@ -251,8 +209,22 @@ def main():
         "--OtherGases",
         metavar="Autres gaz a relacher (optionnel)",
         help="Liste d'especes gazeuses supplementaires separees par des espaces ou des virgules (ex: CO NO N2 H2S).",
-        default="",
+        default=last_config.get("OtherGases", ""),
         widget="TextField"
+    )
+    parser.add_argument(
+        "--exportCSV",
+        action="store_true",
+        default=last_config.get("exportCSV", False),
+        help="",
+        gooey_options={"label": "Exporter CSV (resultats)"}
+    )
+    parser.add_argument(
+        "--nonneg",
+        action="store_true",
+        default=last_config.get("nonneg", False),
+        help="",
+        gooey_options={"label": "Forcer les quantites negatives a zero"}
     )
 
     args = parser.parse_args()
@@ -260,8 +232,11 @@ def main():
     final_formula = args.Prod.strip()
     mass_target   = float(args.m)
     decimals      = args.prec
+    tol           = float(args.tol)
     excel_path    = args.path
+    sheet_raw     = str(args.sheet).strip()
     pivot_el_user = args.PivotEl.strip()
+    run_timestamp = datetime.now()
 
     # Liste des precurseurs
     precs_str = args.Precs.strip()
@@ -279,12 +254,19 @@ def main():
         purete_list = None
 
     # Lecture excel + parse formule finale
-    dict_masses = extract_molar_masses_and_uncertainties(excel_path)
+    if sheet_raw == "":
+        sheet_name = 0
+    else:
+        sheet_name = int(sheet_raw) if sheet_raw.isdigit() else sheet_raw
+    dict_masses = extract_molar_masses_and_uncertainties(excel_path, sheet_name=sheet_name)
     final_dict = parse_formula(final_formula)
+    validate_elements(final_dict, dict_masses, "formule finale")
     M_final, dM_final = get_molar_mass_and_uncert(final_dict, dict_masses)
 
     # Parse des precurseurs
     precursor_dicts = [parse_formula(p) for p in precursors]
+    for prec_name, prec_dict in zip(precursors, precursor_dicts):
+        validate_elements(prec_dict, dict_masses, f"precurseur {prec_name}")
 
     # === Gestion des sous-produits "gaz" ===
     byproducts = []
@@ -363,12 +345,12 @@ def main():
             print("Avertissement : trop de valeurs de purete, surplus ignore.")
         purete_list = purete_list[:nb_init_prec]
 
-    # Tolerances
-    tol = 0.001  # 0.1%
     eps = 1e-14
 
     # Resolution stoechiometrie
-    x_stoich = solve_stoichiometry(final_dict, precursor_dicts)
+    x_stoich, residuals, rank, singular_values = solve_stoichiometry(
+        final_dict, precursor_dicts, nonneg=args.nonneg
+    )
     n_final = mass_target / M_final
 
     # On stocke separément:
@@ -458,11 +440,11 @@ def main():
     if not os.path.exists(folder_name):
         os.makedirs(folder_name)
         
-    timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
+    timestamp_str = run_timestamp.strftime("%Y_%m_%d_%H_%M")
     filename_base = f"{final_formula}_with_{'_'.join(precs_str.split())}"
     if byproducts:
         filename_base += f"_gas_{'_'.join([name for name,_ in byproducts])}"
-    filename_base = f"{timestamp}_{filename_base}"
+    filename_base = f"{timestamp_str}_{filename_base}"
     
     i = 1
     while True:
@@ -479,6 +461,21 @@ def main():
 
     # === Affichage final ===
     print(f"Resultats sauvegardes dans : {candidate_path}\n")
+    print("===== Parametres d'entree =====")
+    print(f"Version            : {APP_VERSION}")
+    print(f"Date execution     : {run_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Fichier Excel      : {excel_path}")
+    print(f"Feuille Excel      : {sheet_name}")
+    print(f"Precurseurs        : {', '.join(precs_str.split())}")
+    if purete_list:
+        print(f"Purete (%)         : {', '.join(f'{p:.2f}' for p in purete_list)}")
+    if byproducts:
+        print(f"Gaz autorises      : {', '.join(name for name, _ in byproducts)}")
+    else:
+        print("Gaz autorises      : aucun")
+    print(f"Tol. verification  : {tol}")
+    print(f"Export CSV         : {'oui' if args.exportCSV else 'non'}")
+    print(f"Contraintes >= 0   : {'oui' if args.nonneg else 'non'}\n")
     print(f"Produit final vise : {final_formula}")
     print(f"Masse visee       : {mass_target:.3f} g")
     print(f"Masse molaire du produit final : {M_final:.3f} +/- {dM_final:.3f} g/mol\n")
@@ -497,6 +494,7 @@ def main():
 
     total_mass = 0.0
     total_moles = 0.0
+    total_mass_uncert_sq = 0.0
     consumed_data = []
     for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
         if M_prec_i != 0:
@@ -506,10 +504,13 @@ def main():
         consumed_data.append((pname, mass_corr, n_prec))
         total_mass += max(mass_corr, 0)
         total_moles += max(n_prec, 0)
+        total_mass_uncert_sq += dmass_corr ** 2
 
     if total_mass < 1e-12 or total_moles < 1e-12:
         print("Aucun precurseur reel consomme !")
     else:
+        total_mass_uncert = math.sqrt(total_mass_uncert_sq)
+        print(f"Total masse precurseurs : {total_mass:.{decimals}f} +/- {total_mass_uncert:.{decimals}f} g")
         for (pname, m_corr, n_corr) in consumed_data:
             frac_mass = m_corr / total_mass
             frac_mole = n_corr / total_moles
@@ -520,12 +521,26 @@ def main():
     if len(results_byproducts) == 0:
         print("Aucun sous-produit calcule (mass negative)")
     else:
+        total_byproduct_uncert_sq = 0.0
         for (pname, mass_rel, dmass_rel) in results_byproducts:
             print(f" - {pname:<8s} : {mass_rel:.{decimals}f} +/- {dmass_rel:.{decimals}f} g liberes")
+            total_byproduct_uncert_sq += dmass_rel ** 2
+        total_byproduct_uncert = math.sqrt(total_byproduct_uncert_sq)
+        total_byproduct_mass = sum(mass for _, mass, _ in results_byproducts)
+        print(f"\nTotal sous-produits : {total_byproduct_mass:.{decimals}f} +/- {total_byproduct_uncert:.{decimals}f} g")
 
     print("\n===== Stoechiometrie totale reconstituee (pour 1 mole du produit) =====")
     for el in sorted(total_elements.keys()):
         print(f"  Element {el} : {total_elements[el]:.3f}")
+
+    print("\n===== Diagnostics de resolution =====")
+    if residuals is not None and len(residuals) > 0:
+        print(f"  Residus (somme) : {residuals[0]:.6g}")
+    else:
+        print("  Residus (somme) : non disponibles")
+    print(f"  Rang matrice    : {rank}")
+    if singular_values is not None and len(singular_values) > 0:
+        print(f"  Valeurs sing.   : {', '.join(f'{val:.6g}' for val in singular_values)}")
 
     print("\n===== Stoechiometrie apportee par chaque precurseur (pour 1 mole du produit) =====")
     for i, (prc_name, sto_dict) in enumerate(partial_stoech):
@@ -538,6 +553,45 @@ def main():
     sys.stdout = backup_stdout
     f_out.close()
     print(f"\nLe fichier de resultats a ete cree ici : {candidate_path}")
+
+    if args.exportCSV:
+        csv_path = os.path.splitext(candidate_path)[0] + ".csv"
+        with open(csv_path, "w", encoding="utf-8", newline="") as csv_file:
+            writer = csv.writer(csv_file, delimiter=";")
+            writer.writerow([
+                "type", "nom", "masse_g", "incertitude_g", "purete_pct",
+                "delta_masse_g", "masse_molaire_g_mol"
+            ])
+            for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
+                writer.writerow([
+                    "precurseur", pname, f"{mass_corr:.{decimals}f}",
+                    f"{dmass_corr:.{decimals}f}", f"{pcent:.2f}",
+                    f"{delta_m:.{decimals}f}", f"{M_prec_i:.6f}"
+                ])
+            for (pname, mass_rel, dmass_rel) in results_byproducts:
+                writer.writerow([
+                    "sous-produit", pname, f"{mass_rel:.{decimals}f}",
+                    f"{dmass_rel:.{decimals}f}", "", "", ""
+                ])
+        print(f"Fichier CSV cree : {csv_path}")
+
+    save_last_config(
+        config_path,
+        {
+            "Prod": final_formula,
+            "m": mass_target,
+            "Precs": precs_str,
+            "Purete": args.Purete.strip(),
+            "PivotEl": pivot_el_user,
+            "prec": decimals,
+            "tol": tol,
+            "path": excel_path,
+            "sheet": str(sheet_name),
+            "OtherGases": args.OtherGases.strip(),
+            "exportCSV": args.exportCSV,
+            "nonneg": args.nonneg,
+        }
+    )
 
 
 if __name__ == "__main__":
