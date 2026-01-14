@@ -18,6 +18,14 @@ Conseils pour reduire la taille de l'executable :
 - Utiliser UPX pour compresser l'executable (option "--upx-dir" de PyInstaller).
 - Exclure les modules inutiles via "--exclude-module" (ex: matplotlib, scipy) si non utilises.
 - Nettoyer les datas embarquees si elles ne sont pas necessaires au runtime.
+- Utiliser le fichier "Le_moleculateur.optimized.spec" (mode onedir + exclusions) : pyinstaller Le_moleculateur.optimized.spec
+
+Nouveautes (version 1.4.0) :
+- Moteur de calcul isole dans "core.py" pour faciliter les tests.
+- Resolution stoechiometrique avec option non-negatif plus robuste (NNLS interne).
+- Diagnostic et synthese des incertitudes globales (totaux precurseurs/sous-produits).
+- Tests automatises (pytest) pour le parsing et la resolution.
+- Build optimise via "Le_moleculateur.optimized.spec".
 
 Nouveautes (version 1.3.0) :
 - Support des formules avec parenthèses, hydrates (ex: CuSO4·5H2O) et charges finales (+/-).

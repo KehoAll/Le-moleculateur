@@ -1,157 +1,23 @@
 import sys
 import os
 import re
-import ast
 import json
-import numpy as np
-import pandas as pd
 import csv
+import math
 from datetime import datetime
 
 from gooey import Gooey, GooeyParser
 
-APP_VERSION = "1.3.0"
+from core import (
+    extract_molar_masses_and_uncertainties,
+    parse_formula,
+    validate_elements,
+    get_molar_mass_and_uncert,
+    solve_stoichiometry,
+)
+
+APP_VERSION = "1.4.0"
 CONFIG_FILENAME = ".le_moleculateur_config.json"
-
-
-###############################################################################
-# 1) Lecture des masses atomiques ET de leurs incertitudes
-###############################################################################
-def extract_molar_masses_and_uncertainties(path, sheet_name=None):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Fichier Excel introuvable: {path}")
-    df = pd.read_excel(path, sheet_name=sheet_name)
-    required_columns = {"Symbol", "Standard atomic weight", "Unnamed: 4"}
-    missing_columns = required_columns.difference(df.columns)
-    if missing_columns:
-        raise ValueError(
-            "Colonnes manquantes dans le fichier Excel: "
-            + ", ".join(sorted(missing_columns))
-        )
-    
-    symbols = df['Symbol'][1:]
-    masses  = df['Standard atomic weight'][1:]
-    errs    = df['Unnamed: 4'][1:]
-    
-    def parse_maybe_interval(value):
-        if isinstance(value, str):
-            try:
-                pair = ast.literal_eval(value)  # ex: "[10.8, 11.0]"
-                return float(np.mean(pair))
-            except (ValueError, SyntaxError):
-                pass
-        return float(value)
-    
-    result = {}
-    for s, m, e in zip(symbols, masses, errs):
-        s = str(s).strip()
-        if not s:
-            continue
-        
-        m_val = parse_maybe_interval(m)
-
-        if pd.isna(e):
-            e_val = 0.0
-        else:
-            try:
-                pair_err = ast.literal_eval(str(e))
-                e_val = abs(pair_err[1] - pair_err[0]) / 2.0
-            except (ValueError, SyntaxError, TypeError):
-                e_val = float(e)
-        
-        result[s] = (m_val, e_val)
-    
-    return result
-
-
-###############################################################################
-# 2) Parsing d'une formule brute => dict { El : stoich }
-###############################################################################
-def parse_formula(formula):
-    formula = re.sub(r"\s+", "", formula)
-    if not formula:
-        raise ValueError("Formule brute vide ou invalide.")
-
-    def strip_charge(fragment):
-        fragment = re.sub(r"\^[0-9]+[+-]$", "", fragment)
-        fragment = re.sub(r"[+-]+$", "", fragment)
-        return fragment
-
-    def parse_fragment(fragment):
-        token_pattern = r'([A-Z][a-z]?|\d+(?:\.\d+)?|\(|\))'
-        tokens = re.findall(token_pattern, fragment)
-        if not tokens:
-            raise ValueError("Formule brute vide ou invalide.")
-
-        def is_number(token):
-            return re.fullmatch(r'\d+(?:\.\d+)?', token) is not None
-
-        def is_element(token):
-            return re.fullmatch(r'[A-Z][a-z]?', token) is not None
-
-        stack = [{}]
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok == "(":
-                stack.append({})
-                i += 1
-                continue
-            if tok == ")":
-                if len(stack) == 1:
-                    raise ValueError("Parenthese fermante sans ouvrante.")
-                group = stack.pop()
-                multiplier = 1.0
-                if i + 1 < len(tokens) and is_number(tokens[i + 1]):
-                    multiplier = float(tokens[i + 1])
-                    i += 1
-                for el, count in group.items():
-                    stack[-1][el] = stack[-1].get(el, 0.0) + count * multiplier
-                i += 1
-                continue
-            if is_element(tok):
-                multiplier = 1.0
-                if i + 1 < len(tokens) and is_number(tokens[i + 1]):
-                    multiplier = float(tokens[i + 1])
-                    i += 1
-                stack[-1][tok] = stack[-1].get(tok, 0.0) + multiplier
-                i += 1
-                continue
-            if is_number(tok):
-                raise ValueError(f"Nombre inattendu dans la formule: '{tok}'.")
-            raise ValueError(f"Jeton inconnu dans la formule: '{tok}'.")
-
-        if len(stack) != 1:
-            raise ValueError("Parenthese ouvrante sans fermante.")
-
-        return stack[0]
-
-    parts = re.split(r"[·.]", formula)
-    total = {}
-    for raw in parts:
-        fragment = strip_charge(raw)
-        if not fragment:
-            continue
-        coeff_match = re.match(r"^(\d+(?:\.\d+)?)(.*)$", fragment)
-        if coeff_match:
-            part_coeff = float(coeff_match.group(1))
-            fragment = coeff_match.group(2)
-        else:
-            part_coeff = 1.0
-        if not fragment:
-            raise ValueError("Formule brute invalide apres coefficient.")
-        fragment_dict = parse_fragment(fragment)
-        for el, count in fragment_dict.items():
-            total[el] = total.get(el, 0.0) + count * part_coeff
-    return total
-
-
-def validate_elements(formula_dict, dict_masses, label):
-    missing = [el for el in formula_dict.keys() if el not in dict_masses]
-    if missing:
-        raise ValueError(
-            f"Elements inconnus dans {label}: {', '.join(sorted(missing))}"
-        )
 
 
 def load_last_config(config_path):
@@ -170,41 +36,6 @@ def save_last_config(config_path, payload):
             json.dump(payload, handle, ensure_ascii=False, indent=2)
     except OSError:
         pass
-
-
-###############################################################################
-# 3) Masse molaire et incertitude d'un compose
-###############################################################################
-def get_molar_mass_and_uncert(comp_dict, dict_masses):
-    M = 0.0
-    dM2 = 0.0
-    for el, count in comp_dict.items():
-        if el not in dict_masses:
-            raise ValueError(f"Element '{el}' introuvable dans le tableau de masses atomiques.")
-        M_el, dM_el = dict_masses[el]
-        M     += count * M_el
-        dM2   += (count * dM_el) ** 2
-    return M, np.sqrt(dM2)
-
-
-###############################################################################
-# 4) Resolution stoech => x
-###############################################################################
-def solve_stoichiometry(final_dict, precursor_dicts):
-    elements = list(final_dict.keys())
-    nb_el = len(elements)
-    nb_prec = len(precursor_dicts)
-    
-    P = np.zeros((nb_el, nb_prec))
-    f = np.zeros(nb_el)
-    
-    for i, el in enumerate(elements):
-        f[i] = final_dict[el]
-        for j, pdict in enumerate(precursor_dicts):
-            P[i, j] = pdict.get(el, 0.0)
-    
-    x, residuals, rank, s = np.linalg.lstsq(P, f, rcond=None)
-    return x, residuals, rank, s
 
 
 ###############################################################################
@@ -517,17 +348,16 @@ def main():
     eps = 1e-14
 
     # Resolution stoechiometrie
-    x_stoich, residuals, rank, singular_values = solve_stoichiometry(final_dict, precursor_dicts)
-    if args.nonneg and np.any(x_stoich < 0):
-        print("Avertissement : coefficients negatifs detectes, remis a zero.")
-        x_stoich = np.maximum(x_stoich, 0.0)
+    x_stoich, residuals, rank, singular_values = solve_stoichiometry(
+        final_dict, precursor_dicts, nonneg=args.nonneg
+    )
     n_final = mass_target / M_final
 
     # On stocke separément:
     results_consumed = []
     results_byproducts = []
 
-    for i, prec_name in enumerate(precursors):
+  for i, prec_name in enumerate(precursors):
         comp_dict_i = precursor_dicts[i]
         M_prec_i, dM_prec_i = get_molar_mass_and_uncert(comp_dict_i, dict_masses)
 
@@ -664,6 +494,7 @@ def main():
 
     total_mass = 0.0
     total_moles = 0.0
+    total_mass_uncert_sq = 0.0
     consumed_data = []
     for (pname, mass_corr, dmass_corr, pcent, delta_m, M_prec_i) in results_consumed:
         if M_prec_i != 0:
@@ -673,10 +504,13 @@ def main():
         consumed_data.append((pname, mass_corr, n_prec))
         total_mass += max(mass_corr, 0)
         total_moles += max(n_prec, 0)
+        total_mass_uncert_sq += dmass_corr ** 2
 
     if total_mass < 1e-12 or total_moles < 1e-12:
         print("Aucun precurseur reel consomme !")
     else:
+        total_mass_uncert = math.sqrt(total_mass_uncert_sq)
+        print(f"Total masse precurseurs : {total_mass:.{decimals}f} +/- {total_mass_uncert:.{decimals}f} g")
         for (pname, m_corr, n_corr) in consumed_data:
             frac_mass = m_corr / total_mass
             frac_mole = n_corr / total_moles
@@ -687,8 +521,13 @@ def main():
     if len(results_byproducts) == 0:
         print("Aucun sous-produit calcule (mass negative)")
     else:
+        total_byproduct_uncert_sq = 0.0
         for (pname, mass_rel, dmass_rel) in results_byproducts:
             print(f" - {pname:<8s} : {mass_rel:.{decimals}f} +/- {dmass_rel:.{decimals}f} g liberes")
+            total_byproduct_uncert_sq += dmass_rel ** 2
+        total_byproduct_uncert = math.sqrt(total_byproduct_uncert_sq)
+        total_byproduct_mass = sum(mass for _, mass, _ in results_byproducts)
+        print(f"\nTotal sous-produits : {total_byproduct_mass:.{decimals}f} +/- {total_byproduct_uncert:.{decimals}f} g")
 
     print("\n===== Stoechiometrie totale reconstituee (pour 1 mole du produit) =====")
     for el in sorted(total_elements.keys()):
