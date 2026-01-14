@@ -357,7 +357,7 @@ def main():
     results_consumed = []
     results_byproducts = []
 
-    for i, prec_name in enumerate(precursors):
+  for i, prec_name in enumerate(precursors):
         comp_dict_i = precursor_dicts[i]
         M_prec_i, dM_prec_i = get_molar_mass_and_uncert(comp_dict_i, dict_masses)
 
