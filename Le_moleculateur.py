@@ -26,7 +26,7 @@ from core import (
     solve_stoichiometry,
 )
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 CONFIG_FILENAME = ".le_moleculateur_config.json"
 
 

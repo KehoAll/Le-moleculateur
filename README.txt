@@ -20,6 +20,12 @@ Conseils pour reduire la taille de l'executable :
 - Nettoyer les datas embarquees si elles ne sont pas necessaires au runtime.
 - Utiliser le fichier "Le_moleculateur.optimized.spec" (mode onedir + exclusions) : pyinstaller Le_moleculateur.optimized.spec
 
+Nouveautes (version 1.4.1) :
+- Lecture Excel sans pandas (openpyxl) pour reduire la taille du build.
+- Build compresse avec UPX + spec optimise mis a jour.
+- Sortie Gooey en UTF-8 pour eviter l'erreur UnicodeDecodeError.
+- Verification des ecarts: evite les faux avertissements quand tol=0.
+
 Nouveautes (version 1.4.0) :
 - Moteur de calcul isole dans "core.py" pour faciliter les tests.
 - Resolution stoechiometrique avec option non-negatif plus robuste (NNLS interne).
