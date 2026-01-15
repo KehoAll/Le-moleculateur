@@ -1,26 +1,77 @@
 import os
 import re
 import ast
+import math
 
 import numpy as np
-import pandas as pd
+from openpyxl import load_workbook
 
 
 def extract_molar_masses_and_uncertainties(path, sheet_name=None):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Fichier Excel introuvable: {path}")
-    df = pd.read_excel(path, sheet_name=sheet_name)
-    required_columns = {"Symbol", "Standard atomic weight", "Unnamed: 4"}
-    missing_columns = required_columns.difference(df.columns)
+    wb = load_workbook(path, data_only=True)
+    try:
+        if sheet_name is None:
+            ws = wb.active
+        elif isinstance(sheet_name, int):
+            ws = wb.worksheets[sheet_name]
+        else:
+            ws = wb[sheet_name]
+    except (IndexError, KeyError):
+        wb.close()
+        raise ValueError(f"Feuille Excel introuvable: {sheet_name!r}") from None
+
+    header_row = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True)))
+
+    def norm_header(value):
+        if value is None:
+            return None
+        return str(value).strip()
+
+    headers = [norm_header(value) for value in header_row]
+
+    def find_header(target):
+        target_norm = target.lower()
+        for idx, value in enumerate(headers):
+            if value is None:
+                continue
+            if value.lower() == target_norm:
+                return idx
+        return None
+
+    symbol_idx = find_header("Symbol")
+    weight_idx = find_header("Standard atomic weight")
+
+    uncertainty_idx = find_header("Unnamed: 4")
+    if uncertainty_idx is None:
+        for idx, value in enumerate(headers):
+            if value and "uncertainty" in value.lower():
+                uncertainty_idx = idx
+                break
+    if uncertainty_idx is None:
+        row2 = list(next(ws.iter_rows(min_row=2, max_row=2, values_only=True)))
+        for idx, value in enumerate(row2):
+            if value and "uncertainty" in str(value).lower():
+                uncertainty_idx = idx
+                break
+    if uncertainty_idx is None and weight_idx is not None:
+        if weight_idx + 1 < len(headers):
+            uncertainty_idx = weight_idx + 1
+
+    missing_columns = []
+    if symbol_idx is None:
+        missing_columns.append("Symbol")
+    if weight_idx is None:
+        missing_columns.append("Standard atomic weight")
+    if uncertainty_idx is None:
+        missing_columns.append("Uncertainty")
     if missing_columns:
+        wb.close()
         raise ValueError(
             "Colonnes manquantes dans le fichier Excel: "
-            + ", ".join(sorted(missing_columns))
+            + ", ".join(missing_columns)
         )
-
-    symbols = df["Symbol"][1:]
-    masses = df["Standard atomic weight"][1:]
-    errs = df["Unnamed: 4"][1:]
 
     def parse_maybe_interval(value):
         if isinstance(value, str):
@@ -31,25 +82,44 @@ def extract_molar_masses_and_uncertainties(path, sheet_name=None):
                 pass
         return float(value)
 
+    def is_missing(value):
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() == ""
+        if isinstance(value, float) and math.isnan(value):
+            return True
+        return False
+
     result = {}
-    for s, m, e in zip(symbols, masses, errs):
-        s = str(s).strip()
-        if not s:
+    for row in ws.iter_rows(min_row=3, values_only=True):
+        symbol = row[symbol_idx] if symbol_idx < len(row) else None
+        if symbol is None:
+            continue
+        symbol = str(symbol).strip()
+        if not symbol:
             continue
 
-        m_val = parse_maybe_interval(m)
+        mass = row[weight_idx] if weight_idx < len(row) else None
+        err = row[uncertainty_idx] if uncertainty_idx < len(row) else None
 
-        if pd.isna(e):
+        if mass is None:
+            continue
+
+        m_val = parse_maybe_interval(mass)
+
+        if is_missing(err):
             e_val = 0.0
         else:
             try:
-                pair_err = ast.literal_eval(str(e))
+                pair_err = ast.literal_eval(str(err))
                 e_val = abs(pair_err[1] - pair_err[0]) / 2.0
             except (ValueError, SyntaxError, TypeError):
-                e_val = float(e)
+                e_val = float(err)
 
-        result[s] = (m_val, e_val)
+        result[symbol] = (m_val, e_val)
 
+    wb.close()
     return result
 
 

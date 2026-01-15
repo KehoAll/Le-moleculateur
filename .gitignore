@@ -1,0 +1,33 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual env / tools
+/.conda/
+/.tools/
+
+# Build outputs
+/build/
+/dist/
+/dist_nuitka/
+*.exe
+!/Le_moleculateur.exe
+*.dll
+*.pkg
+*.toc
+*.log
+*.tmp
+*.bak
+
+# Keep curated spec files, ignore generated ones
+*.spec
+!Le_moleculateur.spec
+!Le_moleculateur.optimized.spec
+
+# Local config / reports
+.le_moleculateur_config.json
+nuitka-crash-report.xml
+.pytest_cache/
+*.egg-info/
+*.whl

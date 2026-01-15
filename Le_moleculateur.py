@@ -8,6 +8,16 @@ from datetime import datetime
 
 from gooey import Gooey, GooeyParser
 
+# Force UTF-8 for Gooey's stdout capture to avoid decode errors.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 from core import (
     extract_molar_masses_and_uncertainties,
     parse_formula,
@@ -357,7 +367,7 @@ def main():
     results_consumed = []
     results_byproducts = []
 
-  for i, prec_name in enumerate(precursors):
+    for i, prec_name in enumerate(precursors):
         comp_dict_i = precursor_dicts[i]
         M_prec_i, dM_prec_i = get_molar_mass_and_uncert(comp_dict_i, dict_masses)
 
@@ -427,7 +437,7 @@ def main():
         found = scaled_elements.get(e, 0.0)
         if target != 0:
             diff_rel = abs(found - target) / target
-            if diff_rel > tol:
+            if diff_rel > (tol + eps):
                 print(f"\nATTENTION : Ecart trop grand pour l'element {e} :")
                 print(f"  Souhaite = {target:.3f},   Obtenu = {found:.3f}")
                 print(f"  Ecart relatif = {diff_rel*100:.2f}% > {tol*100:.1f}%\n")
