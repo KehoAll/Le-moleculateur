@@ -20,6 +20,13 @@ Conseils pour reduire la taille de l'executable :
 - Nettoyer les datas embarquees si elles ne sont pas necessaires au runtime.
 - Utiliser le fichier "Le_moleculateur.optimized.spec" (mode onedir + exclusions) : pyinstaller Le_moleculateur.optimized.spec
 
+Nouveautes (version 1.5.0) :
+- Nouveau mode "Concentration" (solution) pour calculer masses et quantites de matiere a partir d'une formule cible + concentration + volume.
+- Gestion des ions spectateurs (contre-ions) afin de retirer les especes non actives.
+- Sortie enrichie pour les solutions (moles cibles, details par precurseur, CSV et diagnostics).
+- Option "Calcul automatique des ions spectateurs" (par defaut active) si le champ est vide.
+- Saisie plus robuste de C/V (accepte virgule ou point).
+
 Nouveautes (version 1.4.1) :
 - Lecture Excel sans pandas (openpyxl) pour reduire la taille du build.
 - Build compresse avec UPX + spec optimise mis a jour.

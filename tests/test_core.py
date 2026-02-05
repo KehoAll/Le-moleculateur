@@ -1,6 +1,12 @@
 import numpy as np
 
-from core import parse_formula, solve_stoichiometry
+from core import (
+    get_molar_mass_and_uncert,
+    parse_formula,
+    remove_spectators,
+    suggest_spectators,
+    solve_stoichiometry,
+)
 
 
 def test_parse_formula_supports_hydrates_and_charges():
@@ -22,4 +28,48 @@ def test_solve_stoichiometry_nonneg():
     )
     assert np.all(x >= 0.0)
     assert rank >= 1
-    assert len(singular_values) == len(precursor_dicts)
+    assert len(singular_values) == min(len(final_dict), len(precursor_dicts))
+
+
+def test_remove_spectators_simple():
+    prec_dict = parse_formula("CaCl2")
+    spectators = [("Cl", parse_formula("Cl"))]
+    active, removed = remove_spectators(prec_dict, spectators)
+    assert active == {"Ca": 1.0}
+    assert removed == [("Cl", 2)]
+
+
+def test_remove_spectators_polyatomic():
+    prec_dict = parse_formula("Fe(NO3)3")
+    spectators = [("NO3", parse_formula("NO3"))]
+    active, removed = remove_spectators(prec_dict, spectators)
+    assert active == {"Fe": 1.0}
+    assert removed == [("NO3", 3)]
+
+
+def test_solution_simple_case():
+    solute_dict = parse_formula("Ca")
+    prec_dict = parse_formula("CaCl2")
+    spectators = [("Cl", parse_formula("Cl"))]
+    active_dict, _ = remove_spectators(prec_dict, spectators)
+    x, _, _, _ = solve_stoichiometry(solute_dict, [active_dict], nonneg=True)
+
+    concentration = 0.1
+    volume_ml = 100.0
+    n_target = concentration * (volume_ml / 1000.0)
+    n_prec = x[0] * n_target
+
+    dict_masses = {"Ca": (40.0, 0.0), "Cl": (35.0, 0.0)}
+    M_prec, _ = get_molar_mass_and_uncert(prec_dict, dict_masses)
+    mass = M_prec * n_prec
+    assert np.isclose(mass, 0.01 * 110.0)
+
+
+def test_suggest_spectators_auto():
+    solute_dict = parse_formula("KNO3")
+    precursor_dicts = [parse_formula("AgNO3"), parse_formula("K2CO3")]
+    suggested = suggest_spectators(solute_dict, precursor_dicts)
+    names = {name for name, _ in suggested}
+    assert "Ag" in names
+    assert "CO3" in names
+    assert "NO3" not in names

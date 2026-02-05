@@ -130,7 +130,7 @@ def parse_formula(formula):
 
     def strip_charge(fragment):
         fragment = re.sub(r"\^[0-9]+[+-]$", "", fragment)
-        fragment = re.sub(r"(?:(?:\d+)?[+-])$", "", fragment)
+        fragment = re.sub(r"[+-]$", "", fragment)
         return fragment
 
     def parse_fragment(fragment):
@@ -200,6 +200,123 @@ def parse_formula(formula):
         for el, count in fragment_dict.items():
             total[el] = total.get(el, 0.0) + count * part_coeff
     return total
+
+
+COMMON_SPECTATOR_FORMULAS = [
+    "Cl",
+    "Br",
+    "I",
+    "F",
+    "NO3",
+    "SO4",
+    "CO3",
+    "PO4",
+    "OH",
+    "NH4",
+    "ClO4",
+    "Na",
+    "K",
+    "Li",
+    "Mg",
+    "Ca",
+    "Ba",
+    "Sr",
+    "Ag",
+    "Cu",
+    "Zn",
+    "Fe",
+    "Al",
+    "Mn",
+    "Co",
+    "Ni",
+    "Pb",
+]
+
+
+def _can_remove_spectator(prec_dict, spec_dict, eps=1e-12):
+    k_max = None
+    for el, count in spec_dict.items():
+        if count <= 0:
+            continue
+        available = prec_dict.get(el, 0.0)
+        k_el = math.floor((available + eps) / count)
+        if k_max is None or k_el < k_max:
+            k_max = k_el
+    return k_max is not None and k_max > 0
+
+
+def suggest_spectators(solute_dict, precursor_dicts, candidates=None):
+    if candidates is None:
+        candidates = COMMON_SPECTATOR_FORMULAS
+
+    solute_elements = set(solute_dict.keys())
+    suggestions = []
+    seen = set()
+
+    for name in candidates:
+        if name in seen:
+            continue
+        try:
+            spec_dict = parse_formula(name)
+        except Exception:
+            continue
+        key_elements = {el for el in spec_dict.keys() if el not in ("O", "H")}
+        if not key_elements:
+            continue
+        if key_elements.issubset(solute_elements):
+            continue
+        if any(_can_remove_spectator(prec_dict, spec_dict) for prec_dict in precursor_dicts):
+            suggestions.append((name, spec_dict))
+            seen.add(name)
+
+    return suggestions
+
+
+def parse_spectator_list(raw_list):
+    spectators = []
+    if not raw_list:
+        return spectators
+    tokens = re.split(r"[,\s]+", raw_list.strip())
+    for tok in tokens:
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            d_tok = parse_formula(tok)
+            if not d_tok:
+                print(f"Avertissement : ion spectateur '{tok}' non reconnu, ignore.")
+                continue
+            spectators.append((tok, d_tok))
+        except Exception as ex:
+            print(f"Avertissement : ion spectateur '{tok}' non interpretable ({ex}), ignore.")
+    return spectators
+
+
+def remove_spectators(prec_dict, spectators, eps=1e-12):
+    active = dict(prec_dict)
+    removed = []
+    for spec_name, spec_dict in spectators:
+        if not spec_dict:
+            continue
+        k_max = None
+        for el, count in spec_dict.items():
+            if count <= 0:
+                continue
+            available = active.get(el, 0.0)
+            k_el = math.floor((available + eps) / count)
+            if k_max is None or k_el < k_max:
+                k_max = k_el
+        if k_max is None:
+            k_max = 0
+        if k_max > 0:
+            for el, count in spec_dict.items():
+                active[el] = active.get(el, 0.0) - k_max * count
+                if abs(active[el]) <= eps:
+                    active.pop(el, None)
+            removed.append((spec_name, int(k_max)))
+    if not active:
+        print("Avertissement : precurseur compose uniquement d'ions spectateurs apres retrait.")
+    return active, removed
 
 
 def validate_elements(formula_dict, dict_masses, label):
